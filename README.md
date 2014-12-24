@@ -18,12 +18,12 @@ i.e. it's PID then the comm of the task.
 Then there goes several lines of file descriptors owned by
 task, lines look like
 
-  1:            <_1 +2 /foo/bar
-  2:            >^1
+    1:            <_1 +2 /foo/bar
+    2:            >^1
 
 for files that are used by several tasks or just
 
-  3: </foo/bar
+    3: </foo/bar
 
 for those owned by a single task.
 
@@ -36,11 +36,14 @@ and it's referenced by 2 more lines somewhere below. The
 shared with some other one described by the record with
 id 1 above.
 
+Different files are shown with different indentation between
+the FD and the path block.
+
 E.g. the following lines not necesserily go one-by-one
 and describe a file owned by differend tasks
 
-  1:                >_3 +2 /bar/foo
-  ...
-  3:                 ^3
-  ...
-  2:                <^3
+    1:                >_3 +2 /bar/foo
+    ...
+    3:                 ^3
+    ...
+    2:                <^3
