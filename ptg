@@ -1,0 +1,204 @@
+#!/bin/env python
+
+import os
+import sys
+import subprocess
+import argparse
+
+prs = argparse.ArgumentParser("Process ties graph")
+prs.add_argument("pid", help = "PID to start with")
+prs.add_argument("--fd", help = "Show FD ties", default = False, action = 'store_true')
+prs.add_argument("--fd-head", help = "Show FD paths as header", default = False, action = 'store_true')
+args = prs.parse_args();
+
+# Symbols for FD line showing
+fd_ind_sym = " "
+fd_share_sym = "^"
+fd_share_h_sym = "_"
+fd_ro_sym = "<"
+fd_wo_sym = ">"
+fd_rw_sym = " "
+fd_cl_sym = "-"
+
+##############################################################
+class inode:
+	def __init__(self, path):
+		self.path = path
+		self.cnt = 0
+		self.shown = False
+
+	def get(self):
+		self.cnt += 1
+
+	def path_str(self, indent = None):
+		if self.cnt != 1:
+			if indent == None:
+				indent = 0
+				cnt_off = 0
+			else:
+				indent += 1
+				cnt_off = 1
+
+			ino_ind = fd_ind_sym * (self.pr_off - indent)
+			if not self.shown:
+				self.shown = True
+				path = "%c%d +%d %s" % (fd_share_h_sym, self.nr, self.cnt - cnt_off, self.path)
+			else:
+				path = "%c%d" % (fd_share_sym, self.nr)
+		else:
+			ino_ind = ""
+			path = self.path
+
+		return ino_ind, path
+
+class ofile:
+	def __init__(self, m):
+		self._mode = m
+
+	def mode(self):
+		return self._mode
+
+class sk:
+	def __init__(self, ss_out):
+		ss_out = ss_out.split()
+		self.st = ss_out[1]
+		self.name = ss_out[4]
+		self.ino = ss_out[5]
+		self.peer = ss_out[7]
+
+inodes = { }
+start_off = 20
+inc_off = 4
+fdw = 4
+sk_table = map(lambda x: sk(x), subprocess.check_output(["ss", "-xan"]).splitlines() )
+
+def mangle_socket(path):
+	skid = path.split(":")[1].strip("[]")
+	mysk = filter(lambda x: x.ino == skid, sk_table)
+	if not mysk:
+		return path
+
+	mysk = mysk[0]
+	if mysk.st == "LISTEN":
+		return "uxl:[%s]" % (mysk.name)
+
+	if mysk.peer == "*":
+		return "uxc:[%s]" % (mysk.name)
+
+	if int(mysk.ino) > int(mysk.peer):
+		return "uxc:[%s-%s]" % (mysk.peer, mysk.ino)
+	else:
+		return "uxc:[%s-%s]" % (mysk.ino, mysk.peer)
+
+def mangle_path(path):
+	if path.startswith("socket:"):
+		return mangle_socket(path)
+
+	if path.startswith("/dev/pts/"):
+		return "pty:[%s]" % path.split("/")[3]
+
+	if path.startswith("anon_inode:"):
+		return path.split(":")[1]
+
+	return path
+
+def get_inode(opath):
+	path = mangle_path(opath)
+	if not opath.startswith("anon_inode:"): # Anon inodes are typically not shared
+		ino = inodes.get(path, None)
+	else:
+		ino = None
+
+	if not ino:
+		ino = inode(path)
+		inodes[path] = ino
+
+	ino.get()
+	return ino
+
+class task:
+	def __init__(self, pid):
+		self._pid = pid
+		self._comm = ""
+		self._kids = []
+		self._files = { }
+
+	def _pp(self, fname):
+		return "/proc/%d/%s" % (self._pid, fname)
+
+	def _read_kids(self):
+		for th in os.listdir(self._pp("task")):
+			kf = open(self._pp("task/%s/children" % th))
+			kids = kf.read().split()
+			for k in kids:
+				t = task(int(k))
+				self._kids.append(t)
+				t.collect()
+
+	def _read_fds(self):
+		for fd in os.listdir(self._pp("fd")):
+			ino = get_inode(os.readlink( self._pp("fd/%s" % fd) ))
+			flgs = filter(lambda x: x[0] == "flags", map(lambda x: x.split(":"), \
+						open( self._pp("fdinfo/%s" % fd) ).readlines() ) )[0][1].strip()
+			if flgs.endswith("0"):
+				m = fd_ro_sym
+			elif flgs.endswith("1"):
+				m = fd_wo_sym
+			elif flgs.endswith("2"):
+				m = fd_rw_sym
+			else:
+				m = fd_cl_sym
+			fl = ofile(m)
+
+			self._files[int(fd)] = (fl, ino)
+
+	def _read_comm(self):
+		self._comm = open(self._pp("comm")).read().strip()
+
+	def collect(self):
+		self._read_comm()
+		self._read_kids()
+		if args.fd:
+			self._read_fds()
+
+	def _show_kids(self, indent):
+		for k in self._kids:
+			k._show(indent + inc_off)
+
+	def _show_fds(self, indent):
+		for f in self._files:
+			fl, ino = self._files[f]
+			ino_ind, path = ino.path_str(indent)
+			print "%s%*d %s%s%s" % (" " * indent, fdw, f, ino_ind, fl.mode(), path)
+
+
+	def _show(self, indent):
+		print "%s%d: %s" % (" " * indent, self._pid, self._comm)
+		self._show_fds(indent)
+		self._show_kids(indent)
+
+	def show_plain_tree(self):
+		self._show(0)
+
+
+root = task(int(args.pid))
+root.collect()
+
+off = start_off
+ino_nr = 1
+
+for i in inodes:
+	ino = inodes[i]
+	if ino.cnt == 1:
+		continue
+
+	ino.pr_off = off
+	off += inc_off
+	ino.nr = ino_nr
+	ino_nr += 1
+
+	if args.fd_head:
+		ind, path = ino.path_str()
+		print "%s %s%s" % (" " * fdw, ind, path)
+
+root.show_plain_tree()
