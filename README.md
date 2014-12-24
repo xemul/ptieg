@@ -1,0 +1,4 @@
+ptieg
+=====
+
+Process ties graph
